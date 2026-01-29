@@ -1,12 +1,13 @@
 /* EDSDK MEX wrapper 
-* Author: Jack Volponi 1/21/2026
+* Author: Jack Thomas Volponi 1/21/2026
 * Description: This code was written to create a fast matlab interface with a Canon EOS 5D Mark III.
 * It is used to sync recording and flowrate in the SDSU Narrow Channal Apparatus. It is very limited
 * and only supports 1 camera with .CR2 and .MOV files. It is pretty fragile by itself. It is intended
 * to be used insdie a matlab app which can control acess and such.
+* Revision Log:
+* 1/28/2026 JTV:Adding status function to return all state booleans as a MATLAB struct. Used to keep 
+* track of the camera's state inside the MATLAB app.
 */
-//Version 5
-// fixed lots of crash/failure modes 
 
 //Include standard headers
 #include <stdio.h>
@@ -57,6 +58,18 @@ static bool mexLocked = false;
 // Live view stopped by download
 static int notReadyCounter = 0;                 //counter for Camera not ready error
 static volatile bool downloadingActive = false; //bool to flag active download, volatile to allow for multiple threads to access it
+
+/*
+// Define structure type for the camera state
+struct cameraState {
+    bool isSDKInitialized;
+    bool isSessionOpen;
+    bool liveViewActive;
+    bool frameSizeKnown;
+    bool recordingActive;
+    bool mexLocked;
+    bool downloadingActive;
+};*/
 
 // camera lock (serialize camera operations when downloading files)
 //static CRITICAL_SECTION cameraCS;
@@ -1098,8 +1111,56 @@ void cmd_stopMovie(void)
     recordingActive = false;
     return;
 }
-// The gateway function
 
+/*------------------------------------------------------------------------------
+* Function:   cmd_getCameraState
+* Description: Builds and returns a MATLAB struct containing the current camera
+*              state flags used by the MEX wrapper. Each field is a logical
+*              scalar representing an internal boolean state.
+* Parameters: None
+* Returns:    mxArray* - A 1x1 MATLAB struct with fields:
+*                - isSDKInitialized
+*                - isSessionOpen
+*                - liveViewActive
+*                - frameSizeKnown
+*                - recordingActive
+*                - mexLocked
+*                - downloadingActive
+* Notes:      - The returned mxArray is a freshly-created MATLAB struct and
+*                ownership is transferred to the caller. Caller should manage
+*                the returned mxArray (e.g., assign to plhs[] or destroy it).
+*             - No EDSDK calls are made; this function only reads internal flags.
+* --------------------------------------------------------------------------*/
+mxArray* cmd_getCameraState(void)
+{    
+    // create constant character pointer string array to store ouput fieldnames
+    const char* fieldnames[] = { "isSDKInitialized", "isSessionOpen","liveViewActive", "frameSizeKnown",
+        "recordingActive", "mexLocked", "downloadingActive" };
+
+    // Create matlab structure matrix to populate here
+    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 7, fieldnames);
+
+    // Set all the fields
+    mxSetField(camStateStruct, 0, "isSDKInitialized", mxCreateLogicalScalar(isSDKInitialized));
+
+    mxSetField(camStateStruct, 0, "isSessionOpen", mxCreateLogicalScalar(isSessionOpen));
+
+    mxSetField(camStateStruct, 0, "liveViewActive", mxCreateLogicalScalar(liveViewActive));
+
+    mxSetField(camStateStruct, 0, "frameSizeKnown", mxCreateLogicalScalar(frameSizeKnown));
+
+    mxSetField(camStateStruct, 0, "recordingActive", mxCreateLogicalScalar(recordingActive));
+
+    mxSetField(camStateStruct, 0, "mexLocked", mxCreateLogicalScalar(mexLocked));
+
+    mxSetField(camStateStruct, 0, "downloadingActive", mxCreateLogicalScalar(downloadingActive));
+
+    return camStateStruct;
+}
+
+
+
+// The gateway function
 /*------------------------------------------------------------------------------
 * Function:   mexFunction
 * Description: Entry point for the MATLAB MEX function. Dispatches commands to the appropriate functions.
@@ -1168,6 +1229,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     {
         cmd_stopMovie();
 	}
+    else if (strcmp(command, "getState") == 0)
+    {
+        plhs[0] = cmd_getCameraState();
+    }
     else
     {
         mexErrMsgIdAndTxt("edsdk_mex_c:UnknownCommand",
