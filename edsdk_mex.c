@@ -8,6 +8,7 @@
 * 1/28/2026 JTV: Adding status function to return all state booleans as a MATLAB struct. Used to keep 
 * track of the camera's state inside the MATLAB app.
 * 2/02/2026 JTV: Adding cleanup on camera shutdown warning.
+* 2/02/2026 later in day JTV: adding way to change apeture.
 */
 
 //Include standard headers
@@ -63,6 +64,42 @@ static volatile bool downloadingActive = false; //bool to flag active download, 
 // Shutdown Event handling (Need to clear mex in main thread)
 static volatile bool shutDownRequested = false; // Flag to queue a cleanup on shutdown
 static volatile bool mexShutDownHandled = false; // Flag to indicate if the cleanup (called from shutdown has completed)
+
+// Define Apeature Values for EOS 5D Mark III
+typedef struct {
+    EdsUInt32 eds_property_value;
+    double apertureVal;
+} apertureEntry;
+
+// Array to store apeture values for the camera the CSEL owns
+static const apertureEntry EOS5DMkIIIAv[] = {
+  {0x20, 2.8},
+  {0x23, 3.2},
+  {0x24, 3.5},
+  {0x28, 4.0},
+  {0x2B, 4.5},
+  {0x2D, 5.0},
+  {0x30, 5.6},
+  {0x33, 6.3},
+  {0x35, 7.1},
+  {0x38, 8.0},
+  {0x3B, 9.0},
+  {0x3D, 10.0},
+  {0x40, 11.0},
+  {0x44, 13.0},
+  {0x45, 14.0},
+  {0x48, 16.0},
+  {0x4B, 18.0},
+  {0x4D, 20.0},
+  {0x50, 22.0},
+  {0x53, 25.0},
+  {0x55, 29.0},
+  {0x58, 32.0},
+};
+
+// Save #of elements of apetures struct. 
+// Divides the total number of bytes in the whole struct by the number of bytes only in one element
+static const size_t EOS5DMkIIIAv_length = sizeof(EOS5DMkIIIAv) / sizeof(EOS5DMkIIIAv[0]); 
 
 /*
 // Define structure type for the camera state
@@ -1226,7 +1263,38 @@ mxArray* cmd_getCameraState(void)
     return camStateStruct;
 }
 
+// set apeature value command 
+void cmd_setAv(double apertureDouble)
+{
+    EdsError err = EDS_ERR_OK;
 
+    //Create index variable for correct aperture
+    size_t apertureIdx = EOS5DMkIIIAv_length+1;
+
+    // Loop over apeature values to find the index where the aperture value matches the input aperture
+    for (int i = 0; i < EOS5DMkIIIAv_length; i++)
+    {
+        if (EOS5DMkIIIAv[i].apertureVal == apertureDouble)
+        {
+            apertureIdx = i;
+        }
+    }
+
+    if (apertureIdx > EOS5DMkIIIAv_length)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:ApertureError",
+            "Input must be one of the following aperture settings ''2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0, 10, 11, 13, 14, 16, 18, 20, 22, 25, 29, 32''");
+    }
+
+    // Get the property code for the desired aperture
+    EdsUInt32 aperture_prop_val = EOS5DMkIIIAv[apertureIdx].eds_property_value;
+
+    // Set the property 
+    err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &aperture_prop_val);
+
+    if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Av. EdsError: %d", err); }
+
+}
 
 // The gateway function
 /*------------------------------------------------------------------------------
@@ -1253,15 +1321,15 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
 	//int status = 0; // status to return
 
 	// Check number of inputs
-    if (nrhs != 1) {
+    if (nrhs < 1) {
         mexErrMsgIdAndTxt("edsdk_mex_c:InputError",
-            "Exactly one input argument required.");
+            "Atleast one input argument required.");
     }
 
-    // Check input type
+    // Check first input type
     if (!mxIsChar(prhs[0])) {
         mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
-            "Input must be a command string (pass as 'command' in matlab).");
+            "First input must be a command string (pass as 'command' in matlab).");
     }
 
     // Convert matlab string to C string
@@ -1269,6 +1337,30 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         mexErrMsgIdAndTxt("edsdk_mex_c:ConversionError",
             "Command string too long.");
     }
+
+    // Check for command with two input arguemnts
+    if (strcmp(command, "setAv") == 0)
+    {
+        // Check if number of arugments is 2
+        if (nrhs > 2) 
+        {
+            mexErrMsgIdAndTxt("edsdk_mex.c:InputError", "setAv requires exactly 2 inputs: edsdk_mex('setAv', apertureValue).");
+        }
+
+        // Check if input is double scalar
+        if (!mxIsScalar(prhs[1]) || !mxIsNumeric(prhs[1]) || mxIsComplex(prhs[1]))
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
+                "setAv second argument must be a real numeric scalar (e.g. 5.6).");
+        }
+
+        double aperatureDouble = mxGetScalar(prhs[1]);
+
+        cmd_setAv(aperatureDouble);
+        return;
+    }
+
+    
 
 	// Dispatch based on command
     if (strcmp(command, "init") == 0)
