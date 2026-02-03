@@ -9,6 +9,7 @@
 * track of the camera's state inside the MATLAB app.
 * 2/02/2026 JTV: Adding cleanup on camera shutdown warning.
 * 2/02/2026 later in day JTV: adding way to change apeture.
+* 2/03/2026 JTV: adding way to change iso speed 
 */
 
 //Include standard headers
@@ -71,7 +72,7 @@ typedef struct {
     double apertureVal;
 } apertureEntry;
 
-// Array to store apeture values for the camera the CSEL owns
+// Array to store apeture values for the camera the CSEL owns (maybe populate with EdsGetPropDesc in future)
 static const apertureEntry EOS5DMkIIIAv[] = {
   {0x20, 2.8},
   {0x23, 3.2},
@@ -100,6 +101,45 @@ static const apertureEntry EOS5DMkIIIAv[] = {
 // Save #of elements of apetures struct. 
 // Divides the total number of bytes in the whole struct by the number of bytes only in one element
 static const size_t EOS5DMkIIIAv_length = sizeof(EOS5DMkIIIAv) / sizeof(EOS5DMkIIIAv[0]); 
+
+// Define ISO Speed values fo EOS 5D Mark III
+typedef struct {
+    EdsUInt32 eds_property_value;
+    double isoSpeed_val;
+} isoSpeedEntry;
+
+// Structure Array to store valid iso values for camera CSEL owns (maybe populate with EdsGetPropDesc in future)
+static const isoSpeedEntry EOS5DMkIII_iso[] = {
+    {0x00000000, -1}, // Let AUTO correspond to -1
+    {0x00000048, 100},
+    {0x0000004b, 125},
+    {0x0000004d, 160},
+    {0x00000050, 200},
+    {0x00000053, 250},
+    {0x00000055, 320},
+    {0x00000058, 400},
+    {0x0000005b, 500},
+    {0x0000005d, 640},
+    {0x00000060, 800},
+    {0x00000063, 1000},
+    {0x00000065, 1250},
+    {0x00000068, 1600},
+    {0x0000006b, 2000},
+    {0x0000006d, 2500},
+    {0x00000070, 3200},
+    {0x00000073, 4000},
+    {0x00000075, 5000},
+    {0x00000078, 6400},
+    {0x0000007b, 8000},
+    {0x0000007d, 10000},
+    {0x00000080, 12800},
+    {0x00000083, 16000},
+    {0x00000085, 20000},
+    {0x00000088, 25600},
+};
+
+// Define length of the table
+static const size_t EOS5DMkIII_iso_length = sizeof(EOS5DMkIII_iso) / sizeof(EOS5DMkIII_iso[0]);
 
 /*
 // Define structure type for the camera state
@@ -1285,35 +1325,97 @@ mxArray* cmd_getCameraState(void)
 * --------------------------------------------------------------------------*/
 void cmd_setAv(double apertureDouble)
 {
-    EdsError err = EDS_ERR_OK;
+    if (isSDKInitialized && isSessionOpen && gCamera != NULL) {
+        EdsError err = EDS_ERR_OK;
 
-    //Create index variable for correct aperture
-    size_t apertureIdx = EOS5DMkIIIAv_length+1;
+        //Create index variable for correct aperture
+        size_t apertureIdx = EOS5DMkIIIAv_length + 1;
 
-    // Loop over apeature values to find the index where the aperture value matches the input aperture
-    for (int i = 0; i < EOS5DMkIIIAv_length; i++)
-    {
-        if (EOS5DMkIIIAv[i].apertureVal == apertureDouble)
+        // Loop over apeature values to find the index where the aperture value matches the input aperture
+        for (int i = 0; i < EOS5DMkIIIAv_length; i++)
         {
-            apertureIdx = i;
-            break; //exit loop after setting is found
+            if (EOS5DMkIIIAv[i].apertureVal == apertureDouble)
+            {
+                apertureIdx = i;
+                break; //exit loop after setting is found
+            }
         }
-    }
 
-    if (apertureIdx > EOS5DMkIIIAv_length)
+        if (apertureIdx > EOS5DMkIIIAv_length)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:ApertureError",
+                "Input must be one of the following aperture settings ''2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0, 10, 11, 13, 14, 16, 18, 20, 22, 25, 29, 32''");
+        }
+
+        // Get the property code for the desired aperture
+        EdsUInt32 aperture_prop_val = EOS5DMkIIIAv[apertureIdx].eds_property_value;
+
+        // Set the property 
+        err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &aperture_prop_val);
+
+        if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Av. EdsError: %d", err); }
+    }
+    else
     {
-        mexErrMsgIdAndTxt("edsdk_mex_c:ApertureError",
-            "Input must be one of the following aperture settings ''2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0, 10, 11, 13, 14, 16, 18, 20, 22, 25, 29, 32''");
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError", "SDK not initialized or session not open.");
     }
+}
 
-    // Get the property code for the desired aperture
-    EdsUInt32 aperture_prop_val = EOS5DMkIIIAv[apertureIdx].eds_property_value;
 
-    // Set the property 
-    err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &aperture_prop_val);
+/*------------------------------------------------------------------------------
+* Function:   cmd_setISO
+* Description: Set the camera ISO speed for the supported EOS 5D Mark III by
+*              mapping a numeric ISO value to the camera-specific Eds property
+*              code contained in the `EOS5DMkIII_iso` lookup table.
+* Parameters: double isoDouble
+*              - A real scalar matching one of the supported ISO values exactly.
+*                Supported values:
+*                -1 (AUTO), 100, 125, 160, 200, 250, 320, 400, 500, 640, 800,
+*                1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000,
+*                10000, 12800, 16000, 20000, 25600
+* Returns:    None
+* Notes:      - Expects an active camera session (global `gCamera` should be valid).
+*             - If the input value does not match an entry in the lookup table,
+*               the function raises a MATLAB error via `mexErrMsgIdAndTxt`.
+*             - On failure to write the property the function prints the EDSDK
+*               error code (does not raise a MATLAB error for property write failures).
+* --------------------------------------------------------------------------*/
+void cmd_setISO(double isoDouble)
+{
+    if (isSDKInitialized && isSessionOpen && gCamera != NULL) {
+        EdsError err = EDS_ERR_OK;
 
-    if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Av. EdsError: %d", err); }
+        //Create index variable for correct aperture
+        size_t isoIdx = EOS5DMkIII_iso_length + 1;
 
+        // Loop over apeature values to find the index where the aperture value matches the input aperture
+        for (int i = 0; i < EOS5DMkIII_iso_length; i++)
+        {
+            if (EOS5DMkIII_iso[i].isoSpeed_val == isoDouble)
+            {
+                isoIdx = i;
+                break; //exit loop after setting is found
+            }
+        }
+
+        if (isoIdx > EOS5DMkIII_iso_length)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:IsoSpeedError",
+                "Input must be one of the following IsoSpeed settings ''-1(AUTO), 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600.''");
+        }
+
+        // Get the property code for the desired aperture
+        EdsUInt32 isoSpeed_prop_val = EOS5DMkIII_iso[isoIdx].eds_property_value;
+
+        // Set the property 
+        err = EdsSetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(kEdsPropID_ISOSpeed), &isoSpeed_prop_val);
+
+        if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_ISOSpeed. EdsError: %d", err); }
+    }
+    else
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError", "SDK not initialized or session not open.");
+    }
 }
 
 // The gateway function
@@ -1359,28 +1461,44 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     }
 
     // Check for command with two input arguemnts
-    if (strcmp(command, "setAv") == 0)
+    if (strcmp(command, "setAv") == 0 || strcmp(command, "setISO") == 0 )
     {
         // Check if number of arugments is 2
         if (nrhs > 2) 
         {
-            mexErrMsgIdAndTxt("edsdk_mex.c:InputError", "setAv requires exactly 2 inputs: edsdk_mex('setAv', apertureValue).");
+            mexErrMsgIdAndTxt("edsdk_mex.c:InputError", "setAv or setISO requires exactly 2 inputs: edsdk_mex('setAv', apertureValue) or edsdk_mex('setISO', isoValue).");
         }
 
         // Check if input is double scalar
         if (!mxIsScalar(prhs[1]) || !mxIsNumeric(prhs[1]) || mxIsComplex(prhs[1]))
         {
             mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
-                "setAv second argument must be a real numeric scalar (e.g. 5.6).");
+                "setAv or setISO second argument must be a real numeric scalar (e.g. 5.6).");
         }
 
-        double aperatureDouble = mxGetScalar(prhs[1]);
+        if (strcmp(command, "setAv") == 0)
+        {
+            // convert matlab mxArray object pointer to C double
+            double aperatureDouble = mxGetScalar(prhs[1]);
 
-        cmd_setAv(aperatureDouble);
-        return;
-    }
+            cmd_setAv(aperatureDouble);
+            return;
+        }
+        else if (strcmp(command, "setISO") == 0)
+        {
+            
+            double isoDouble = mxGetScalar(prhs[1]);
 
-    
+            cmd_setISO(isoDouble);
+            return;
+        }
+        else
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:UnknownCommand",
+                "Unknown command: %s", command);
+        }
+        
+    }    
 
 	// Dispatch based on command
     if (strcmp(command, "init") == 0)
