@@ -5,8 +5,9 @@
 * and only supports 1 camera with .CR2 and .MOV files. It is pretty fragile by itself. It is intended
 * to be used insdie a matlab app which can control acess and such.
 * Revision Log:
-* 1/28/2026 JTV:Adding status function to return all state booleans as a MATLAB struct. Used to keep 
+* 1/28/2026 JTV: Adding status function to return all state booleans as a MATLAB struct. Used to keep 
 * track of the camera's state inside the MATLAB app.
+* 2/02/2026 JTV: Adding cleanup on camera shutdown warning.
 */
 
 //Include standard headers
@@ -58,6 +59,10 @@ static bool mexLocked = false;
 // Live view stopped by download
 static int notReadyCounter = 0;                 //counter for Camera not ready error
 static volatile bool downloadingActive = false; //bool to flag active download, volatile to allow for multiple threads to access it
+
+// Shutdown Event handling (Need to clear mex in main thread)
+static volatile bool shutDownRequested = false; // Flag to queue a cleanup on shutdown
+static volatile bool mexShutDownHandled = false; // Flag to indicate if the cleanup (called from shutdown has completed)
 
 /*
 // Define structure type for the camera state
@@ -305,6 +310,58 @@ static EdsError EDSCALLBACK handleObjectEvent(EdsObjectEvent event, EdsBaseRef o
 }
 
 /*------------------------------------------------------------------------------
+* Function:   handleStateEvent
+* Description: Callback function to handle camera state events from the EDSDK.
+*              Handles events such as shutdown, error and other camera state
+*              transitions. Keep the callback minimal and thread-safe: do
+*              best-effort EDSDK calls only, do NOT call any MATLAB API (mx* or mex*)
+*              from this function.Signal the main / MATLAB thread(via a volatile
+*              flag or OS event) for any MATLAB - thread cleanup.
+*              Parameters: EdsStateEvent event - The ID of the state event that occurs.
+*              EdsUInt32 parameter - Event - specific parameter(often unused).
+*              EdsVoid * context - User - defined context pointer(may be NULL).
+* Returns : EdsError - EDSDK error code indicating success(EDS_ERR_OK) or failure.
+* ---------------------------------------------------------------------------- */
+static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 parameter, EdsVoid* context)
+{
+    EdsError err = EDS_ERR_OK;
+    printf("StateEvent: 0x%08X\n", event);
+
+    if (event == kEdsStateEvent_Shutdown) //if camera is disconnected from computer
+    {
+        // Reset flags
+        eventHasFired = true; 
+        downloadingActive = false;
+        liveViewActive = false; 
+        recordingActive = false; 
+        isSessionOpen = false;       
+        
+
+        //Clear EDS related objects
+        if (gEvfImage) { EdsRelease(gEvfImage); gEvfImage = NULL; }
+        if (gEvfStream) { EdsRelease(gEvfStream); gEvfStream = NULL; }
+        if (gCamera) { EdsRelease(gCamera); gCamera = NULL; }
+        if (gCameraList) { EdsRelease(gCameraList); gCameraList = NULL; }
+
+        //Clear turbo jpeg stuff 
+        if (tj) { tjDestroy(tj); tj = NULL; }
+                            
+        // Reset frame related counters and flags
+        frameSizeKnown = false;
+        notReadyCounter = 0;
+
+        // Request shutdown in main thread. Matlab mex objects assume they are 
+        // on the main matlab managed thread.
+        shutDownRequested = true; 
+
+        printf("Camera was disconnected from PC. shutDownRequested = %d\n", shutDownRequested);
+        printf("Please call edsdk_mex('getState') to unlock mex from the main thread. \n");
+    }
+
+    return err;
+}
+
+/*------------------------------------------------------------------------------
 * Function:   cmd_init
 * Description: Initializes the EDSDK and connects to the first available camera.
 * Parameters: None
@@ -373,10 +430,21 @@ void cmd_init(void)
     }
 
     // Set Event Handler
+    // Object Event
     if (err == EDS_ERR_OK)
     {
         err = EdsSetObjectEventHandler(gCamera, kEdsObjectEvent_All, handleObjectEvent, NULL);
         printf("set object event handler err = %u\n", err);
+    }
+    else
+    {
+        cleanup(err);
+    }
+
+    // State Events
+    if (err == EDS_ERR_OK)
+    {
+        err = EdsSetCameraStateEventHandler(gCamera, kEdsStateEvent_All, handleStateEvent, NULL);
     }
     else
     {
@@ -1170,6 +1238,17 @@ mxArray* cmd_getCameraState(void)
 * --------------------------------------------------------------------------*/
 void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
 {
+    if (shutDownRequested) // Flag that signals if the camera is disconnect from computer somehow
+    {
+        
+        cleanup(EDS_ERR_OK); // perform remaining cleanup, clean mex in main matlab thread
+        shutDownRequested = false;
+        mexShutDownHandled = true; 
+        printf("Shutdown request caught, mex unlocked. \n");
+
+        return;
+    }
+
 	char command[64]; // buffer to hold command
 	//int status = 0; // status to return
 
