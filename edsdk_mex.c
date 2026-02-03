@@ -1263,7 +1263,26 @@ mxArray* cmd_getCameraState(void)
     return camStateStruct;
 }
 
-// set apeature value command 
+/*------------------------------------------------------------------------------
+* Function:   cmd_setAv
+* Description: Set the camera aperture (Av) for the supported EOS 5D Mark III
+*              by mapping a numeric aperture value to the camera-specific
+*              Eds property code contained in the `EOS5DMkIIIAv` lookup table.
+* Parameters: double apertureDouble
+*              - A real scalar matching one of the supported aperture values
+*                exactly. Supported values:
+*                2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0,
+*                10, 11, 13, 14, 16, 18, 20, 22, 25, 29, 32
+* Returns:    None
+* Notes:      - Expects an active camera session (global `gCamera` should be
+*                valid). The function does not open/close sessions.
+*             - If the input value does not match an entry in the lookup
+*               table, the function raises a MATLAB error via
+*               `mexErrMsgIdAndTxt`.
+*             - On failure to set the camera property the function prints an
+*               error message with the EDSDK error code (does not raise MATLAB
+*               error for property write failures).
+* --------------------------------------------------------------------------*/
 void cmd_setAv(double apertureDouble)
 {
     EdsError err = EDS_ERR_OK;
@@ -1277,6 +1296,7 @@ void cmd_setAv(double apertureDouble)
         if (EOS5DMkIIIAv[i].apertureVal == apertureDouble)
         {
             apertureIdx = i;
+            break; //exit loop after setting is found
         }
     }
 
