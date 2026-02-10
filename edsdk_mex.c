@@ -10,6 +10,7 @@
 * 2/02/2026 JTV: Adding cleanup on camera shutdown warning.
 * 2/02/2026 later in day JTV: adding way to change apeture.
 * 2/03/2026 JTV: adding way to change iso speed 
+* 2/09/2026 JTV: Adding elapsed recording time 
 */
 
 //Include standard headers
@@ -19,6 +20,7 @@
 #include <windows.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h> //Standard time library
 
 //Include EDSDK headers
 #include <EDSDK.h>
@@ -141,21 +143,9 @@ static const isoSpeedEntry EOS5DMkIII_iso[] = {
 // Define length of the table
 static const size_t EOS5DMkIII_iso_length = sizeof(EOS5DMkIII_iso) / sizeof(EOS5DMkIII_iso[0]);
 
-/*
-// Define structure type for the camera state
-struct cameraState {
-    bool isSDKInitialized;
-    bool isSessionOpen;
-    bool liveViewActive;
-    bool frameSizeKnown;
-    bool recordingActive;
-    bool mexLocked;
-    bool downloadingActive;
-};*/
-
-// camera lock (serialize camera operations when downloading files)
-//static CRITICAL_SECTION cameraCS;
-//static bool cameraCSInitialized = false;
+// Recording Time Variables (also see static bool recordingActive = false;)
+static clock_t movStartClock;
+static double movElapsedTime = 0.0;
 
 /*------------------------------------------------------------------------------
 * Function:   build_unique_filename
@@ -326,7 +316,7 @@ void cleanup(EdsError err)
 static EdsError EDSCALLBACK handleObjectEvent(EdsObjectEvent event, EdsBaseRef object, EdsVoid* context)
 {
     EdsError err = EDS_ERR_OK;
-    printf("ObjectEvent: 0x%08X\n", event);
+    //printf("ObjectEvent: 0x%08X\n", event);
     if (event == kEdsObjectEvent_DirItemRequestTransfer || event == kEdsObjectEvent_DirItemCreated)
     {
         EdsStreamRef stream = NULL;
@@ -402,7 +392,7 @@ static EdsError EDSCALLBACK handleObjectEvent(EdsObjectEvent event, EdsBaseRef o
 static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 parameter, EdsVoid* context)
 {
     EdsError err = EDS_ERR_OK;
-    printf("StateEvent: 0x%08X\n", event);
+    //printf("StateEvent: 0x%08X\n", event);
 
     if (event == kEdsStateEvent_Shutdown) //if camera is disconnected from computer
     {
@@ -1205,7 +1195,20 @@ void cmd_startMovie(void)
     }
        
     // Check error 
-    if (err != EDS_ERR_OK) { printf("Error starting movie EdsError: %d\n", err); }
+    if (err != EDS_ERR_OK) { 
+        printf("Error starting movie EdsError: %d\n", err);
+        recordingActive = false; 
+        movElapsedTime = 0.0;
+        return;
+    }
+    
+    //set recording active flag
+    recordingActive = true; 
+
+    // Log Start Movie elapsed time stopwatch start time
+    movStartClock = clock();
+    movElapsedTime = 0.0; 
+
     return;  
 }
 
@@ -1254,7 +1257,24 @@ void cmd_stopMovie(void)
     }
 
     recordingActive = false;
+    movElapsedTime = 0.0;
+
     return;
+}
+
+// Function to get the amount of time spent recording in seconds as type double
+double cmd_getMovTime(void)
+{
+    if (recordingActive) //block acessing movStartClock when it is not initialized
+    {
+        movElapsedTime = (clock() - movStartClock) / (double) CLOCKS_PER_SEC;
+    }
+    else
+    {
+        movElapsedTime = 0.0;
+    }
+
+    return movElapsedTime;
 }
 
 /*------------------------------------------------------------------------------
@@ -1439,6 +1459,9 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         return;
     }
 
+    // Populate cpu clock on access, Set clock
+    //movStartClock = clock();
+
 	char command[64]; // buffer to hold command
 	//int status = 0; // status to return
 
@@ -1541,6 +1564,12 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     else if (strcmp(command, "getState") == 0)
     {
         plhs[0] = cmd_getCameraState();
+    }
+    else if (strcmp(command, "getMovTime") == 0)
+    {
+        double movElapsedTime_output = cmd_getMovTime();
+
+        plhs[0] = mxCreateDoubleScalar(movElapsedTime_output);
     }
     else
     {
