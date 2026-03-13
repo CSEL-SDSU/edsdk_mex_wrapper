@@ -68,6 +68,11 @@ static volatile bool downloadingActive = false; //bool to flag active download, 
 static volatile bool shutDownRequested = false; // Flag to queue a cleanup on shutdown
 static volatile bool mexShutDownHandled = false; // Flag to indicate if the cleanup (called from shutdown has completed)
 
+// Cache and que movie downloads 
+static EdsDirectoryItemRef gPendingMovieItem = NULL; //Actual object that is created when event == kEdsObjectEvent_DirItemRequestTransfer || event == kEdsObjectEvent_DirItemCreated)
+static EdsDirectoryItemInfo gPendingMovieInfo = { 0 };
+static bool pendingMovieDownload = false; 
+
 // Define Apeature Values for EOS 5D Mark III
 typedef struct {
     EdsUInt32 eds_property_value;
@@ -285,6 +290,18 @@ void cleanup(EdsError err)
         isSDKInitialized = false;
     }
 
+
+    // Cleanup stored movie info
+    if (gPendingMovieItem)
+    {
+        EdsRelease(gPendingMovieItem);
+        gPendingMovieItem = NULL;
+    }
+
+    pendingMovieDownload = false; 
+    memset(&gPendingMovieInfo, 0, sizeof(gPendingMovieInfo));
+
+
     // Unlock Mex if it is locked
     if (mexLocked) {
         mexUnlock();
@@ -306,6 +323,87 @@ void cleanup(EdsError err)
 }
 
 /*------------------------------------------------------------------------------
+* Function:   download_directory_item
+* Description: Helper that downloads a directory item (image or movie) reported
+*              by the camera to a uniquely-named file on the host filesystem.
+*              - Determines whether the incoming item is a movie (.MOV) or an
+*                image (.CR2) by inspecting the directory item info.
+*              - Builds a unique filename using `build_unique_filename`.
+*              - Creates a host file stream and issues `EdsDownload`.
+*              - Marks `downloadingActive` while the transfer is in progress
+*                and calls `EdsDownloadComplete` when finished.
+*              - Releases the created stream and returns the EDSDK error code.
+* Parameters: EdsDirectoryItemRef object       - EDSDK directory item to download.
+*             EdsDirectoryItemInfo* dirItemInfo - Pointer to item info (size, name).
+* Returns:    EdsError - EDSDK status (EDS_ERR_OK on success).
+* Notes:      - Caller is responsible for providing a valid `dirItemInfo`.
+*             - This function updates the module global `downloadingActive`
+*               flag to indicate active transfers.
+* ---------------------------------------------------------------------------*/
+static EdsError download_directory_item(EdsDirectoryItemRef object, const EdsDirectoryItemInfo* dirItemInfo)
+{
+    EdsError err = EDS_ERR_OK;
+    EdsStreamRef stream = NULL;
+    bool movieFlag = false; 
+    EdsChar uniqueName[256];
+
+    if (!object || !dirItemInfo) return EDS_ERR_INVALID_PARAMETER;
+
+    //Create Unique Filename
+    //determine if file is .mov or .cr2, image or video file
+    //Camera will create ".MOV" file if it makes a movie
+    movieFlag = strstr(dirItemInfo->szFileName, ".MOV") != NULL;
+
+    if (!build_unique_filename(uniqueName, sizeof(uniqueName), movieFlag)) {
+        err = EDS_ERR_INTERNAL_ERROR; // or another suitable code
+    }
+    if (err != EDS_ERR_OK) { printf("Error building filename. EdsError %d \n", err); }
+
+    // Create File stream and download the image or video
+    if (err == EDS_ERR_OK)
+    {
+        err = EdsCreateFileStream(uniqueName, kEdsFileCreateDisposition_CreateAlways, kEdsAccess_ReadWrite, &stream);
+    }
+    if (err != EDS_ERR_OK) { printf("Error creating filestream. EdsError %d \n", err); }
+
+    if (err == EDS_ERR_OK)
+    {
+        downloadingActive = true;
+        err = EdsDownload(object, dirItemInfo->size, stream);        
+    }
+    if (err != EDS_ERR_OK) { printf("Error downloading file. EdsError %d \n", err); }
+
+    if (err == EDS_ERR_OK)
+    {
+        err = EdsDownloadComplete(object);
+        if (err != EDS_ERR_OK)
+        {
+            printf("Error completeing download EdsError %d \n", err);
+        }
+                
+    }
+    else
+    {
+        EdsDownloadCancel(object);
+    }
+
+    downloadingActive = false;
+
+    if (err == EDS_ERR_OK)
+    {
+        printf("Downloaded file: %s\n", uniqueName);
+    }
+    if (stream) 
+    {
+        EdsRelease(stream);
+        stream = NULL;
+    }
+
+    return err; 
+
+}
+
+/*------------------------------------------------------------------------------
 * Function:   handleObjectEvent
 * Description: Callback function to handle object events from the camera.
 * Parameters: EdsObjectEvent event - The ID of the event that occurs.
@@ -319,7 +417,6 @@ static EdsError EDSCALLBACK handleObjectEvent(EdsObjectEvent event, EdsBaseRef o
     //printf("ObjectEvent: 0x%08X\n", event);
     if (event == kEdsObjectEvent_DirItemRequestTransfer || event == kEdsObjectEvent_DirItemCreated)
     {
-        EdsStreamRef stream = NULL;
         EdsDirectoryItemInfo dirItemInfo = { 0 };
 		bool movieFlag = false;        
 
@@ -335,42 +432,38 @@ static EdsError EDSCALLBACK handleObjectEvent(EdsObjectEvent event, EdsBaseRef o
         //Camera will create ".MOV" file if it makes a movie
         movieFlag = strstr(dirItemInfo.szFileName, ".MOV") != NULL;
 
-        EdsChar uniqueName[256];
+        if (movieFlag)
+        {
+            // Hold onto movie for later download
+            if (gPendingMovieItem) // Check for already story movie, release of already stored
+            {
+                EdsRelease(gPendingMovieItem);
+                gPendingMovieItem = NULL;
+            }
 
-        if (!build_unique_filename(uniqueName, sizeof(uniqueName), movieFlag)) {
-            err = EDS_ERR_INTERNAL_ERROR; // or another suitable code
+            // Store new movie file
+            EdsRetain(object);
+            gPendingMovieItem = (EdsDirectoryItemRef)object;
+            gPendingMovieInfo = dirItemInfo;
+            pendingMovieDownload = true;
+
+            printf("Movie stored. Call edsdk_mex('downloadMovie') to download \n");
         }
-        if (err != EDS_ERR_OK) { printf("Error building filename. EdsError %d \n", err); }
-
-
-        // Create File stream and download the image or video
-        if (err == EDS_ERR_OK)
+        else //download images immediately.
         {
-            err = EdsCreateFileStream(uniqueName, kEdsFileCreateDisposition_CreateAlways, kEdsAccess_ReadWrite, &stream);
+            err = download_directory_item((EdsDirectoryItemRef)object, &dirItemInfo);
+            
+            if (err != EDS_ERR_OK)
+            {
+                printf("photo download failed. EdsError %d\n", err);
+            }
+
         }
-        if (err != EDS_ERR_OK) { printf("Error creating filestream. EdsError %d \n", err); }
-
-        if (err == EDS_ERR_OK)
-        {
-            err = EdsDownload(object, dirItemInfo.size, stream);
-            downloadingActive = true;
-        }
-        if (err != EDS_ERR_OK) { printf("Error downloading file. EdsError %d \n", err); }
-
-        if (err == EDS_ERR_OK)
-        {
-            err = EdsDownloadComplete(object);
-            downloadingActive = false;
-        }        
-
-        if (err == EDS_ERR_OK)
-        {
-            printf("Downloaded file: %s\n", uniqueName);            
-        }        
         eventHasFired = true;
-        if(stream) EdsRelease(stream);
-        stream = NULL;
+
     }
+
+    // Release objet when done
     if (object) EdsRelease(object);
 
     return err;
@@ -404,7 +497,9 @@ static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 para
         isSessionOpen = false;       
         
 
+        // Removing cleanup in call back. Cleanup is now deffered to the next edsdk call. Prevents asynchronus shutdown from separate threads.
         //Clear EDS related objects
+        /*
         if (gEvfImage) { EdsRelease(gEvfImage); gEvfImage = NULL; }
         if (gEvfStream) { EdsRelease(gEvfStream); gEvfStream = NULL; }
         if (gCamera) { EdsRelease(gCamera); gCamera = NULL; }
@@ -412,7 +507,8 @@ static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 para
 
         //Clear turbo jpeg stuff 
         if (tj) { tjDestroy(tj); tj = NULL; }
-                            
+                           
+                           */
         // Reset frame related counters and flags
         frameSizeKnown = false;
         notReadyCounter = 0;
@@ -426,6 +522,34 @@ static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 para
     }
 
     return err;
+}
+
+void cmd_downloadMovie(void)
+{
+    EdsError err = EDS_ERR_OK;
+
+    if (!pendingMovieDownload || !gPendingMovieItem)
+    {
+        printf("no stored movie \n");
+        return;
+    }
+
+    err = download_directory_item(gPendingMovieItem, &gPendingMovieInfo);
+    if (err != EDS_ERR_OK)
+    {
+        printf("movie download failed. EdsError %d \n",err);
+        return;
+    }
+
+    // Release directory item now that were done with it
+    EdsRelease(gPendingMovieItem);
+
+    // Reset flags and stored information
+    gPendingMovieItem = NULL;
+
+    // Fill memoery location of movie info with zeros that takes up the same amount of memory as gPendingMovieInfo
+    memset(&gPendingMovieInfo, 0, sizeof(gPendingMovieInfo));
+    pendingMovieDownload = false; 
 }
 
 /*------------------------------------------------------------------------------
@@ -633,6 +757,16 @@ void cmd_terminate(void)
         mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
             "cmd_terminate failed. Error code: %d", (int)err);
     }    
+
+    // Cleanup stored movie info
+    if (gPendingMovieItem)
+    {
+        EdsRelease(gPendingMovieItem);
+        gPendingMovieItem = NULL;
+    }
+
+    pendingMovieDownload = false;
+    memset(&gPendingMovieInfo, 0, sizeof(gPendingMovieInfo));
 
     if (mexLocked) {
         mexUnlock();
@@ -971,7 +1105,8 @@ mxArray* cmd_getFrame(void)
     else // Other error
     {
         //LeaveCriticalSection(&cameraCS);
-        cleanup(err);
+		printf("EdsDownloadEvfImage error: %d\n", err);
+		return mxCreateDoubleMatrix(0, 0, mxREAL); // return empty array on error, do not call
     }
 
     
@@ -986,7 +1121,8 @@ mxArray* cmd_getFrame(void)
     // if downloaded is false, return the stored frame
     if (!downloaded)
     {
-        return mxImage;
+        if (mxImage) return mxImage;
+		return mxCreateDoubleMatrix(0, 0, mxREAL); // return empty array if no stored frame
     }
 
     // Decode the image outside of single thread
@@ -1300,10 +1436,10 @@ mxArray* cmd_getCameraState(void)
 {    
     // create constant character pointer string array to store ouput fieldnames
     const char* fieldnames[] = { "isSDKInitialized", "isSessionOpen","liveViewActive", "frameSizeKnown",
-        "recordingActive", "mexLocked", "downloadingActive" };
+        "recordingActive", "mexLocked", "downloadingActive", "pendingMovieDownload" };
 
     // Create matlab structure matrix to populate here
-    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 7, fieldnames);
+    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 8, fieldnames);
 
     // Set all the fields
     mxSetField(camStateStruct, 0, "isSDKInitialized", mxCreateLogicalScalar(isSDKInitialized));
@@ -1319,6 +1455,8 @@ mxArray* cmd_getCameraState(void)
     mxSetField(camStateStruct, 0, "mexLocked", mxCreateLogicalScalar(mexLocked));
 
     mxSetField(camStateStruct, 0, "downloadingActive", mxCreateLogicalScalar(downloadingActive));
+
+    mxSetField(camStateStruct, 0, "pendingMovieDownload", mxCreateLogicalScalar(pendingMovieDownload));
 
     return camStateStruct;
 }
@@ -1570,6 +1708,10 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         double movElapsedTime_output = cmd_getMovTime();
 
         plhs[0] = mxCreateDoubleScalar(movElapsedTime_output);
+    }
+    else if (strcmp(command, "downloadMovie") == 0)
+    {
+        cmd_downloadMovie();
     }
     else
     {
