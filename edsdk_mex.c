@@ -11,6 +11,11 @@
 * 2/02/2026 later in day JTV: adding way to change apeture.
 * 2/03/2026 JTV: adding way to change iso speed 
 * 2/09/2026 JTV: Adding elapsed recording time 
+* 3/13/2026 JTV: Adding way to download movies after they are made instead of immediately when the
+* camera reports them. This is because movies take a long time to download and it is better to control
+* when that happens from the matlab app so that the flow control is not locked while downloading. Also
+* fixed bug that led to matlab memory access violation when the camera was shut off when matlab was also
+* asking for frames.
 */
 
 //Include standard headers
