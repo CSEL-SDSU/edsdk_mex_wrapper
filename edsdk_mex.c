@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <time.h> //Standard time library
+#include <math.h>
 
 //Include EDSDK headers
 #include <EDSDK.h>
@@ -67,7 +68,9 @@ static bool mexLocked = false;
 
 // Live view stopped by download
 static int notReadyCounter = 0;                 //counter for Camera not ready error
-static volatile bool downloadingActive = false; //bool to flag active download, volatile to allow for multiple threads to access it
+static volatile bool downloadingActive = false; //bool to flag active download, volatile to allow for multiple threads to access it.
+// Volatile forces the variable to written and read to and from memoery every time it is referenced. It cannot be stored by caching it 
+// on a cpu register
 
 // Shutdown Event handling (Need to clear mex in main thread)
 static volatile bool shutDownRequested = false; // Flag to queue a cleanup on shutdown
@@ -156,6 +159,244 @@ static const size_t EOS5DMkIII_iso_length = sizeof(EOS5DMkIII_iso) / sizeof(EOS5
 // Recording Time Variables (also see static bool recordingActive = false;)
 static clock_t movStartClock;
 static double movElapsedTime = 0.0;
+
+
+/*------------------------Integer to value helper functions--------------------*/
+#define EDS_VALUE_NOT_VALID   (-2.0) //Standard double to return if the conversion returns something not valid
+
+/*------------------------------------------------------------------------------
+* Function:   eds_iso_code_to_value
+* Description:Maps the 32 bit integer code to an iso double from section
+*             5.2.22 in the EDSDK API Programming Reference for the property
+*             kEdsPropID_ISOSpeed.
+* Parameters: EdsUInt32 iso_code - integer representign a possible aperture value
+* Returns:    double - value for the ISO sensitvity.
+* ----------------------------------------------------------------------------*/
+#define EDS_VALUE_ISO_AUTO        (-1.0)
+static double eds_iso_code_to_value(EdsUInt32 iso_code)
+{
+    switch (iso_code) {
+    case 0x00000000: return EDS_VALUE_ISO_AUTO;       // ISO Auto
+
+    case 0x00000028: return 6.0;
+    case 0x00000030: return 12.0;
+    case 0x00000038: return 25.0;
+    case 0x00000040: return 50.0;
+    case 0x00000048: return 100.0;
+    case 0x0000004B: return 125.0;
+    case 0x0000004D: return 160.0;
+    case 0x00000050: return 200.0;
+    case 0x00000053: return 250.0;
+    case 0x00000055: return 320.0;
+    case 0x00000058: return 400.0;
+    case 0x0000005B: return 500.0;
+    case 0x0000005D: return 640.0;
+    case 0x00000060: return 800.0;
+    case 0x00000063: return 1000.0;
+    case 0x00000065: return 1250.0;
+    case 0x00000068: return 1600.0;
+    case 0x0000006B: return 2000.0;
+    case 0x0000006D: return 2500.0;
+    case 0x00000070: return 3200.0;
+    case 0x00000073: return 4000.0;
+    case 0x00000075: return 5000.0;
+    case 0x00000078: return 6400.0;
+    case 0x0000007B: return 8000.0;
+    case 0x0000007D: return 10000.0;
+    case 0x00000080: return 12800.0;
+    case 0x00000083: return 16000.0;
+    case 0x00000085: return 20000.0;
+    case 0x00000088: return 25600.0;
+    case 0x0000008B: return 32000.0;
+    case 0x0000008D: return 40000.0;
+    case 0x00000090: return 51200.0;
+    case 0x00000093: return 64000.0;
+    case 0x00000095: return 80000.0;
+    case 0x00000098: return 102400.0;
+    case 0x000000A0: return 204800.0;
+    case 0x000000A8: return 409600.0;
+    case 0x000000B0: return 819200.0;
+
+    case 0xFFFFFFFFu: return EDS_VALUE_NOT_VALID;
+
+    default: return NAN;
+    }
+}
+
+/*------------------------------------------------------------------------------
+* Function:   eds_av_code_to_fnumber
+* Description:Maps the 32 bit integer code to a fnumber aperature double from section
+*             5.2.25 in the EDSDK API Programming Reference for the property
+*             kEdsPropID_Av.
+* Parameters: EdsUInt32 av_code - integer representign a possible aperture value
+* Returns:    double - value for the aperture.
+* ----------------------------------------------------------------------------*/
+static double eds_av_code_to_fnumber(EdsUInt32 av_code)
+{
+    switch (av_code) {
+        case 0x00000008: return 1.0;
+        case 0x0000000B: return 1.1;
+        case 0x0000000C: return 1.2;
+        case 0x0000000D: return 1.2;   // 1.2, 1/3-step variant
+        case 0x00000010: return 1.4;
+        case 0x00000013: return 1.6;
+        case 0x00000014: return 1.8;
+        case 0x00000015: return 1.8;   // 1.8, 1/3-step variant
+        case 0x00000018: return 2.0;
+        case 0x0000001B: return 2.2;
+        case 0x0000001C: return 2.5;
+        case 0x0000001D: return 2.5;   // 2.5, 1/3-step variant
+        case 0x00000020: return 2.8;
+        case 0x00000023: return 3.2;
+        case 0x00000085: return 3.4;
+        case 0x00000024: return 3.5;
+        case 0x00000025: return 3.5;   // 3.5, 1/3-step variant
+        case 0x00000028: return 4.0;
+        case 0x0000002B: return 4.5;
+        case 0x0000002C: return 4.5;
+        case 0x0000002D: return 5.0;
+        case 0x00000030: return 5.6;
+        case 0x00000033: return 6.3;
+        case 0x00000034: return 6.7;
+        case 0x00000035: return 7.1;
+        case 0x00000038: return 8.0;
+        case 0x0000003B: return 9.0;
+        case 0x0000003C: return 9.5;
+        case 0x0000003D: return 10.0;
+        case 0x00000040: return 11.0;
+        case 0x00000043: return 13.0;  // 13, 1/3-step variant
+        case 0x00000044: return 13.0;
+        case 0x00000045: return 14.0;
+        case 0x00000048: return 16.0;
+        case 0x0000004B: return 18.0;
+        case 0x0000004C: return 19.0;
+        case 0x0000004D: return 20.0;
+        case 0x00000050: return 22.0;
+        case 0x00000053: return 25.0;
+        case 0x00000054: return 27.0;
+        case 0x00000055: return 29.0;
+        case 0x00000058: return 32.0;
+        case 0x0000005B: return 36.0;
+        case 0x0000005C: return 38.0;
+        case 0x0000005D: return 40.0;
+        case 0x00000060: return 45.0;
+        case 0x00000063: return 51.0;
+        case 0x00000064: return 54.0;
+        case 0x00000065: return 57.0;
+        case 0x00000068: return 64.0;
+        case 0x0000006B: return 72.0;
+        case 0x0000006C: return 76.0;
+        case 0x0000006D: return 80.0;
+        case 0x00000070: return 91.0;
+
+        case 0xFFFFFFFFu: return EDS_VALUE_NOT_VALID;
+
+        default: return NAN;
+    }
+}
+
+/*------------------------------------------------------------------------------
+* Function:   eds_Tv_value_to_shutter_speed
+* Description:Maps the 32 bit integer code to a shutter speed double from section
+*             5.2.26 in the EDSDK API Programming Reference for the property
+*             kEdsPropID_Tv.
+* Parameters: EdsUInt32 tv_code - integer representign a possible shutter speed value
+* Returns:    double - value for the shutter speed.
+* ----------------------------------------------------------------------------*/
+#define EDS_TV_BULB_SECONDS        (-1.0)
+static double eds_Tv_value_to_shutter_speed(EdsUInt32 tv_code)
+{
+    switch (tv_code) {
+    case 0x0000000C: return EDS_TV_BULB_SECONDS;      // Bulb
+
+    case 0x00000010: return 30.0;                     // 30"
+    case 0x00000013: return 25.0;                     // 25"
+    case 0x00000014: return 20.0;                     // 20"
+    case 0x00000015: return 20.0;                     // 20" 1/3-step display variant
+    case 0x00000018: return 15.0;                     // 15"
+    case 0x0000001B: return 13.0;                     // 13"
+    case 0x0000001C: return 10.0;                     // 10"
+    case 0x0000001D: return 10.0;                     // 10" 1/3-step display variant
+    case 0x00000020: return 8.0;                      // 8"
+    case 0x00000023: return 6.0;                      // 6" 1/3-step display variant
+    case 0x00000024: return 6.0;                      // 6"
+    case 0x00000025: return 5.0;                      // 5"
+    case 0x00000028: return 4.0;                      // 4"
+    case 0x0000002B: return 3.2;                      // 3"2
+    case 0x0000002C: return 3.0;                      // 3"
+    case 0x0000002D: return 2.5;                      // 2"5
+    case 0x00000030: return 2.0;                      // 2"
+    case 0x00000033: return 1.6;                      // 1"6
+    case 0x00000034: return 1.5;                      // 1"5
+    case 0x00000035: return 1.3;                      // 1"3
+    case 0x00000038: return 1.0;                      // 1"
+    case 0x0000003B: return 0.8;                      // 0"8
+    case 0x0000003C: return 0.7;                      // 0"7
+    case 0x0000003D: return 0.6;                      // 0"6
+    case 0x00000040: return 0.5;                      // 0"5
+    case 0x00000043: return 0.4;                      // 0"4
+    case 0x00000044: return 0.3;                      // 0"3
+    case 0x00000045: return 1.0 / 3.0;                // 0"3, exact 1/3
+
+    case 0x00000048: return 1.0 / 4.0;                // 1/4
+    case 0x0000004B: return 1.0 / 5.0;                // 1/5
+    case 0x0000004C: return 1.0 / 6.0;                // 1/6
+    case 0x0000004D: return 1.0 / 6.0;                // 1/6 1/3-step display variant
+    case 0x00000050: return 1.0 / 8.0;                // 1/8
+    case 0x00000053: return 1.0 / 10.0;               // 1/10 1/3-step display variant
+    case 0x00000054: return 1.0 / 10.0;               // 1/10
+    case 0x00000055: return 1.0 / 13.0;               // 1/13
+    case 0x00000058: return 1.0 / 15.0;               // 1/15
+    case 0x0000005B: return 1.0 / 20.0;               // 1/20 1/3-step display variant
+    case 0x0000005C: return 1.0 / 20.0;               // 1/20
+    case 0x0000005D: return 1.0 / 25.0;               // 1/25
+    case 0x00000060: return 1.0 / 30.0;               // 1/30
+    case 0x00000063: return 1.0 / 40.0;               // 1/40
+    case 0x00000064: return 1.0 / 45.0;               // 1/45
+    case 0x00000065: return 1.0 / 50.0;               // 1/50
+    case 0x00000068: return 1.0 / 60.0;               // 1/60
+    case 0x0000006B: return 1.0 / 80.0;               // 1/80
+    case 0x0000006C: return 1.0 / 90.0;               // 1/90
+    case 0x0000006D: return 1.0 / 100.0;              // 1/100
+    case 0x00000070: return 1.0 / 125.0;              // 1/125
+    case 0x00000073: return 1.0 / 160.0;              // 1/160
+    case 0x00000074: return 1.0 / 180.0;              // 1/180
+    case 0x00000075: return 1.0 / 200.0;              // 1/200
+    case 0x00000078: return 1.0 / 250.0;              // 1/250
+    case 0x0000007B: return 1.0 / 320.0;              // 1/320
+    case 0x0000007C: return 1.0 / 350.0;              // 1/350
+    case 0x0000007D: return 1.0 / 400.0;              // 1/400
+    case 0x00000080: return 1.0 / 500.0;              // 1/500
+    case 0x00000083: return 1.0 / 640.0;              // 1/640
+    case 0x00000084: return 1.0 / 750.0;              // 1/750
+    case 0x00000085: return 1.0 / 800.0;              // 1/800
+    case 0x00000088: return 1.0 / 1000.0;             // 1/1000
+    case 0x0000008B: return 1.0 / 1250.0;             // 1/1250
+    case 0x0000008C: return 1.0 / 1500.0;             // 1/1500
+    case 0x0000008D: return 1.0 / 1600.0;             // 1/1600
+    case 0x00000090: return 1.0 / 2000.0;             // 1/2000
+    case 0x00000093: return 1.0 / 2500.0;             // 1/2500
+    case 0x00000094: return 1.0 / 3000.0;             // 1/3000
+    case 0x00000095: return 1.0 / 3200.0;             // 1/3200
+    case 0x00000098: return 1.0 / 4000.0;             // 1/4000
+    case 0x0000009B: return 1.0 / 5000.0;             // 1/5000
+    case 0x0000009C: return 1.0 / 6000.0;             // 1/6000
+    case 0x0000009D: return 1.0 / 6400.0;             // 1/6400
+    case 0x000000A0: return 1.0 / 8000.0;             // 1/8000
+    case 0x000000A3: return 1.0 / 10000.0;            // 1/10000
+    case 0x000000A5: return 1.0 / 12800.0;            // 1/12800
+    case 0x000000A8: return 1.0 / 16000.0;            // 1/16000
+    case 0x000000AB: return 1.0 / 20000.0;            // 1/20000
+    case 0x000000AD: return 1.0 / 25600.0;            // 1/25600
+    case 0x000000B0: return 1.0 / 32000.0;            // 1/32000
+
+    case 0xFFFFFFFF: return EDS_VALUE_NOT_VALID; // Not valid / no settings change
+
+    default: return NAN;                              // Unknown Tv code
+    }
+}
+
+/*--------------------- END Integer to value helper functions--------------------*/
 
 /*------------------------------------------------------------------------------
 * Function:   build_unique_filename
@@ -529,6 +770,14 @@ static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 para
     return err;
 }
 
+/*------------------------------------------------------------------------------
+* Function:    cmd_downloadMovie
+* Description: Function to download a stored movie directory item, gPendingMovieItem.
+*              The function checks if there is a stored item and if there is one,
+*              it downloads the item to the host pc and resets the movie info varible
+*              to zeros. 
+* Returns : EDSDK Errors
+* ---------------------------------------------------------------------------- */
 void cmd_downloadMovie(void)
 {
     EdsError err = EDS_ERR_OK;
@@ -1441,10 +1690,11 @@ mxArray* cmd_getCameraState(void)
 {    
     // create constant character pointer string array to store ouput fieldnames
     const char* fieldnames[] = { "isSDKInitialized", "isSessionOpen","liveViewActive", "frameSizeKnown",
-        "recordingActive", "mexLocked", "downloadingActive", "pendingMovieDownload" };
+        "recordingActive", "mexLocked", "downloadingActive", "pendingMovieDownload", "shutterSpeeds", 
+        "apertureFNumbers","ISOSpeeds", "currentShutterSpeed", "currentAperture","currentISO"};
 
     // Create matlab structure matrix to populate here
-    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 8, fieldnames);
+    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 14, fieldnames);
 
     // Set all the fields
     mxSetField(camStateStruct, 0, "isSDKInitialized", mxCreateLogicalScalar(isSDKInitialized));
@@ -1463,7 +1713,167 @@ mxArray* cmd_getCameraState(void)
 
     mxSetField(camStateStruct, 0, "pendingMovieDownload", mxCreateLogicalScalar(pendingMovieDownload));
 
+    // Get all the possibe shutter speed values, aperature values, and iso values
+    EdsError err = EDS_ERR_OK;
+
+    EdsPropertyDesc AvPropDesc = { 0 };
+    EdsPropertyDesc TvPropDesc = { 0 };
+    EdsPropertyDesc ISOPropDesc = { 0 };
+
+    err = EdsGetPropertyDesc(gCamera, kEdsPropID_Av, &AvPropDesc);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_Av property description, EdsError code = %d \n", (int)err);
+    }
+
+    err = EdsGetPropertyDesc(gCamera, kEdsPropID_Tv, &TvPropDesc);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_Tv property description, EdsError code = %d \n", (int)err);
+    }
+
+    err = EdsGetPropertyDesc(gCamera, kEdsPropID_ISOSpeed, &ISOPropDesc);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_ISOSpeed property description, EdsError code = %d \n", (int)err);
+    }
+
+    // Allocate matlab arrays for the possible values 
+    mxArray* shutter_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)TvPropDesc.numElements, mxREAL);
+    mxArray* aperture_fnumbers = mxCreateDoubleMatrix((mwSize)1, (mwSize)AvPropDesc.numElements, mxREAL);
+    mxArray* ISO_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)ISOPropDesc.numElements, mxREAL);
+
+    // Get pointers to the underlying data in the mxarrays
+    double* shutter_speeds_array_values = mxGetDoubles(shutter_speeds);
+    double* aperture_fnumbers_array_values = mxGetDoubles(aperture_fnumbers);
+    double* ISO_speeds_array_values = mxGetDoubles(ISO_speeds);
+
+    // Loop over all the values in the TvPropDesc and convert them to actual shutter speeds.
+    // Modify the underlying data of the mxarray 
+    for (int i = 0; i < TvPropDesc.numElements; i++)
+    {
+        shutter_speeds_array_values[i] = eds_Tv_value_to_shutter_speed(TvPropDesc.propDesc[i]);
+    }
+
+    for (int j = 0; j < AvPropDesc.numElements; j++)
+    {
+        aperture_fnumbers_array_values[j] = eds_av_code_to_fnumber(AvPropDesc.propDesc[j]);
+    }
+
+    for (int k = 0; k < ISOPropDesc.numElements; k++)
+    {
+        ISO_speeds_array_values[k] = eds_iso_code_to_value(ISOPropDesc.propDesc[k]);
+    }
+
+    // Add arrays to the state struct
+    mxSetField(camStateStruct, 0, "shutterSpeeds", shutter_speeds);
+    mxSetField(camStateStruct, 0, "apertureFNumbers", aperture_fnumbers);
+    mxSetField(camStateStruct, 0, "ISOSpeeds", ISO_speeds);
+
+    // Get the current settings for Shutter speed, aperture, and iso
+    EdsUInt32 currentTv;
+    EdsUInt32 currentAv;
+    EdsUInt32 currentISOSpeed;
+
+    err = EdsGetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(currentAv), &currentAv);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_Av property data EdsError code = %d \n", (int)err);
+    }
+
+    err = EdsGetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(currentTv), &currentTv);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_Tv property data EdsError code = %d \n", (int)err);
+    }
+
+    err = EdsGetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(currentISOSpeed), &currentISOSpeed);
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "error getting kEdsPropID_ISOSpeed property data EdsError code = %d \n", (int)err);
+    }
+
+    mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(eds_Tv_value_to_shutter_speed(currentTv)));
+    mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(eds_av_code_to_fnumber(currentAv)));
+    mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(eds_iso_code_to_value(currentISOSpeed)));
+
     return camStateStruct;
+}
+
+/*------------------------------------------------------------------------------
+* Function:   cmd_setTv
+* Description: Set the camera shutter speed (Tv) for the supported EOS 5D Mark III
+*              by getting the availible values and setting them using a lookup table.
+* Parameters: double TvDouble
+*              - A real scalar matching one of the supported shutter speed values
+*                exactly. Supported values: see eds_Tv_value_to_shutter_speed
+* Returns:    None
+* Notes:      - Expects an active camera session (global `gCamera` should be
+*                valid). The function does not open/close sessions.
+*             - If the input value does not match an entry in the lookup
+*               table, the function raises a MATLAB error via
+*               `mexErrMsgIdAndTxt`.
+*             - On failure to set the camera property the function prints an
+*               error message with the EDSDK error code (does not raise MATLAB
+*               error for property write failures).
+* --------------------------------------------------------------------------*/
+void cmd_setTv(double TvDouble)
+{
+    if (isSDKInitialized && isSessionOpen && gCamera != NULL) {
+        EdsError err = EDS_ERR_OK;
+
+        // Get possible shutter speed(Tv) values
+        EdsPropertyDesc TvPropDesc = { 0 };
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_Tv, &TvPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Tv property description, EdsError code = %d \n",(int)err);
+        }
+
+        // Loop over all the possible values and determine if the selected value can be set.
+        // 
+        //Create index variable for correct aperture
+        size_t TvIdx = TvPropDesc.numElements + 1;
+
+        // Loop over apeature values to find the index where the aperture value matches the input aperture
+        for (int i = 0; i < TvPropDesc.numElements; i++)
+        {
+            // Get the corresponding double aperature value for the current possible setting
+            double current_shutter_speed_seconds = eds_Tv_value_to_shutter_speed(TvPropDesc.propDesc[i]);
+
+            if (current_shutter_speed_seconds == TvDouble)
+            {
+                TvIdx = i;
+                break; //exit loop after setting is found
+            }
+        }
+
+        if (TvIdx > TvPropDesc.numElements)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:TvError",
+                "Input Tv not availible to be set");
+        }
+
+        // Get the property code for the desired shutter speed 
+        EdsUInt32 Tv_prop_val = TvPropDesc.propDesc[TvIdx];
+
+        // Set the property 
+        err = EdsSetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(kEdsPropID_Tv), &Tv_prop_val);
+
+        if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Tv. EdsError: %d", err); }
+    }
+    else
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError", "SDK not initialized or session not open.");
+    }
 }
 
 /*------------------------------------------------------------------------------
@@ -1491,30 +1901,45 @@ void cmd_setAv(double apertureDouble)
     if (isSDKInitialized && isSessionOpen && gCamera != NULL) {
         EdsError err = EDS_ERR_OK;
 
+        // Get possible shutter speed(Tv) values
+        EdsPropertyDesc AvPropDesc = { 0 };
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_Av, &AvPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Av property description, EdsError code = %d \n", (int)err);
+        }
+
+        // Loop over all the possible values and determine if the selected value can be set.
+        // 
         //Create index variable for correct aperture
-        size_t apertureIdx = EOS5DMkIIIAv_length + 1;
+        size_t AvIdx = AvPropDesc.numElements + 1;
 
         // Loop over apeature values to find the index where the aperture value matches the input aperture
-        for (int i = 0; i < EOS5DMkIIIAv_length; i++)
+        for (int i = 0; i < AvPropDesc.numElements; i++)
         {
-            if (EOS5DMkIIIAv[i].apertureVal == apertureDouble)
+            // Get the corresponding double aperature value for the current possible setting
+            double current_aperture = eds_av_code_to_fnumber(AvPropDesc.propDesc[i]);
+
+            if (current_aperture == apertureDouble)
             {
-                apertureIdx = i;
+                AvIdx = i;
                 break; //exit loop after setting is found
             }
         }
 
-        if (apertureIdx > EOS5DMkIIIAv_length)
+        if (AvIdx > AvPropDesc.numElements)
         {
-            mexErrMsgIdAndTxt("edsdk_mex_c:ApertureError",
-                "Input must be one of the following aperture settings ''2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6, 6.3, 7.1, 8.0, 9.0, 10, 11, 13, 14, 16, 18, 20, 22, 25, 29, 32''");
+            mexErrMsgIdAndTxt("edsdk_mex_c:AvError",
+                "Input Av not availible to be set");
         }
 
-        // Get the property code for the desired aperture
-        EdsUInt32 aperture_prop_val = EOS5DMkIIIAv[apertureIdx].eds_property_value;
+        // Get the property code for the desired shutter speed 
+        EdsUInt32 Av_prop_val = AvPropDesc.propDesc[AvIdx];
 
         // Set the property 
-        err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &aperture_prop_val);
+        err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &Av_prop_val);
 
         if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Av. EdsError: %d", err); }
     }
@@ -1548,27 +1973,39 @@ void cmd_setISO(double isoDouble)
     if (isSDKInitialized && isSessionOpen && gCamera != NULL) {
         EdsError err = EDS_ERR_OK;
 
+        // Get possible shutter speed(Tv) values
+        EdsPropertyDesc ISOPropDesc = { 0 };
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_ISOSpeed, &ISOPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_ISOSpeed property description, EdsError code = %d \n", (int)err);
+        }
+
         //Create index variable for correct aperture
-        size_t isoIdx = EOS5DMkIII_iso_length + 1;
+        size_t isoIdx = ISOPropDesc.numElements + 1;
 
         // Loop over apeature values to find the index where the aperture value matches the input aperture
-        for (int i = 0; i < EOS5DMkIII_iso_length; i++)
+        for (int i = 0; i < ISOPropDesc.numElements; i++)
         {
-            if (EOS5DMkIII_iso[i].isoSpeed_val == isoDouble)
+            double current_iso = eds_iso_code_to_value(ISOPropDesc.propDesc[i]);
+
+            if (current_iso == isoDouble)
             {
                 isoIdx = i;
                 break; //exit loop after setting is found
             }
         }
 
-        if (isoIdx > EOS5DMkIII_iso_length)
+        if (isoIdx > ISOPropDesc.numElements)
         {
-            mexErrMsgIdAndTxt("edsdk_mex_c:IsoSpeedError",
-                "Input must be one of the following IsoSpeed settings ''-1(AUTO), 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000, 12800, 16000, 20000, 25600.''");
+            mexErrMsgIdAndTxt("edsdk_mex_c:ISOError",
+                "Input ISO not availible to be set");
         }
 
         // Get the property code for the desired aperture
-        EdsUInt32 isoSpeed_prop_val = EOS5DMkIII_iso[isoIdx].eds_property_value;
+        EdsUInt32 isoSpeed_prop_val = ISOPropDesc.propDesc[isoIdx];
 
         // Set the property 
         err = EdsSetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(kEdsPropID_ISOSpeed), &isoSpeed_prop_val);
@@ -1617,7 +2054,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     // Check first input type
     if (!mxIsChar(prhs[0])) {
         mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
-            "First input must be a command string (pass as 'command' in matlab).");
+            "First input must be a command string (pass as 'command' in matlab with single quotes).");
     }
 
     // Convert matlab string to C string
@@ -1627,7 +2064,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
     }
 
     // Check for command with two input arguemnts
-    if (strcmp(command, "setAv") == 0 || strcmp(command, "setISO") == 0 )
+    if (strcmp(command, "setAv") == 0 || strcmp(command, "setISO") == 0 || strcmp(command, "setTv") == 0)
     {
         // Check if number of arugments is 2
         if (nrhs > 2) 
@@ -1639,7 +2076,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         if (!mxIsScalar(prhs[1]) || !mxIsNumeric(prhs[1]) || mxIsComplex(prhs[1]))
         {
             mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
-                "setAv or setISO second argument must be a real numeric scalar (e.g. 5.6).");
+                "setAv, setTv, or setISO second argument must be a real numeric scalar (e.g. 5.6).");
         }
 
         if (strcmp(command, "setAv") == 0)
@@ -1656,6 +2093,13 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
             double isoDouble = mxGetScalar(prhs[1]);
 
             cmd_setISO(isoDouble);
+            return;
+        }
+        else if (strcmp(command, "setTv") == 0)
+        {
+            double TvDouble = mxGetScalar(prhs[1]);
+
+            cmd_setTv(TvDouble);
             return;
         }
         else
