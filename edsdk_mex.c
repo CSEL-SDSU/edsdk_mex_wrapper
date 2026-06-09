@@ -16,6 +16,8 @@
 * when that happens from the matlab app so that the flow control is not locked while downloading. Also
 * fixed bug that led to matlab memory access violation when the camera was shut off when matlab was also
 * asking for frames.
+* 6/08/2026 JTV: Added ability to adjust shutter speed. Added quering camera for possible settings instead of
+* hard coding. 
 */
 
 //Include standard headers
@@ -27,6 +29,7 @@
 #include <stdbool.h>
 #include <time.h> //Standard time library
 #include <math.h>
+#include <ctype.h>
 
 //Include EDSDK headers
 #include <EDSDK.h>
@@ -52,6 +55,7 @@ static bool eventHasFired = false;
 static bool liveViewActive = false;
 static bool frameSizeKnown = false; //Image size known flag
 static bool recordingActive = false; 
+static bool movieModeActive = false; 
 
 // Image stuff
 static EdsEvfImageRef gEvfImage = NULL;
@@ -547,6 +551,8 @@ void cleanup(EdsError err)
     pendingMovieDownload = false; 
     memset(&gPendingMovieInfo, 0, sizeof(gPendingMovieInfo));
 
+    // Cleanup movie mode
+    movieModeActive = false;
 
     // Unlock Mex if it is locked
     if (mexLocked) {
@@ -741,6 +747,7 @@ static EdsError EDSCALLBACK handleStateEvent(EdsStateEvent event, EdsUInt32 para
         liveViewActive = false; 
         recordingActive = false; 
         isSessionOpen = false;       
+        movieModeActive = false;
         
 
         // Removing cleanup in call back. Cleanup is now deffered to the next edsdk call. Prevents asynchronus shutdown from separate threads.
@@ -1021,6 +1028,8 @@ void cmd_terminate(void)
 
     pendingMovieDownload = false;
     memset(&gPendingMovieInfo, 0, sizeof(gPendingMovieInfo));
+
+    movieModeActive = false; 
 
     if (mexLocked) {
         mexUnlock();
@@ -1529,6 +1538,101 @@ mxArray* cmd_getFrame(void)
 
 }
 
+
+void cmd_setMovieMode(bool movieModeOn)
+{
+    // allow if initialized and open and camera exists and not currently recording
+    if (!isSDKInitialized || !isSessionOpen || gCamera == NULL)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "SDK not initialized or session not open.");
+    }
+
+    if (recordingActive)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:MovieModeError",
+            "Cannot change movie mode while recording.");
+    }
+
+    
+    EdsError err = EDS_ERR_OK;
+
+    // Check Movie mode
+    // movieMode 0 : Disable , 1 : Enable
+    EdsUInt32 movieMode = 0;
+    if (err == EDS_ERR_OK)
+    {
+        err = EdsGetPropertyData(gCamera, kEdsPropID_FixedMovie, 0, sizeof(movieMode), &movieMode);
+    }
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "Error getting movie mode state. EdsError: %d", (int)err);
+    }
+
+    movieModeActive = (movieMode != 0);
+
+    if (movieModeActive == movieModeOn)
+    {
+        return;
+    }
+
+    // Set movie mode if it needs to be changed
+    if (movieModeOn)
+    {
+        EdsUInt32 saveTo = kEdsSaveTo_Camera;
+        err = EdsSetPropertyData(gCamera, kEdsPropID_SaveTo, 0, sizeof(saveTo), &saveTo);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error setting SaveTo to camera. EdsError: %d", (int)err);
+        }
+
+        err = EdsSendCommand(gCamera, kEdsCameraCommand_MovieSelectSwON, 0);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error turning on movie mode. EdsError: %d", (int)err);
+        }
+
+        movieModeActive = true;
+    }
+    else
+    {
+        //turn off movie mode and set the save location back to both
+        err = EdsSendCommand(gCamera, kEdsCameraCommand_MovieSelectSwOFF, 0);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error turning off movie mode. EdsError: %d", (int)err);
+        }
+        movieModeActive = false;
+
+        EdsUInt32 saveTo = kEdsSaveTo_Host;
+        err = EdsSetPropertyData(gCamera, kEdsPropID_SaveTo, 0, sizeof(saveTo), &saveTo);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error setting SaveTo to host. EdsError: %d", (int)err);
+        }
+
+        EdsCapacity cameraCapacity;
+        cameraCapacity.numberOfFreeClusters = 0x7FFFFFFF;
+        cameraCapacity.bytesPerSector = 512;
+        cameraCapacity.reset = 1;
+
+        err = EdsSetCapacity(gCamera, cameraCapacity);
+
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error setting host capacity. EdsError: %d", (int)err);
+        }
+    }    
+
+    // Check host capacity after switchign back to host save
+
+}
 /*------------------------------------------------------------------------------
 * Function:   cmd_startMovie
 * Description: Starts movie recording on the camera. Switches the save location
@@ -1555,9 +1659,9 @@ void cmd_startMovie(void)
 	EdsError err = EDS_ERR_OK;
 
     //set save to location to Camera. Cannot directly save movie to PC
-    EdsUInt32 saveTo = kEdsSaveTo_Camera;
+    /*EdsUInt32 saveTo = kEdsSaveTo_Camera;
     err = EdsSetPropertyData(gCamera, kEdsPropID_SaveTo, 0, sizeof(saveTo), &saveTo);
-    if (err != EDS_ERR_OK) { printf("Error seting save to location to camera. EdsError: %d\n", err); }
+    if (err != EDS_ERR_OK) { printf("Error seting save to location to camera. EdsError: %d\n", err); }*/
     
     // Check Movie mode
     EdsUInt32 movieMode;
@@ -1567,15 +1671,22 @@ void cmd_startMovie(void)
     }
     if (err != EDS_ERR_OK) { printf("Error getting movie mode state. EdsError: %d\n", err); }
 
+    if (movieMode != 1)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "movie mode not active.");
+        return; 
+    }
+
     // Set movie mode to on
-    if (err == EDS_ERR_OK)
+    /*if (err == EDS_ERR_OK)
     {
         if (movieMode == 0)
         {
             err = EdsSendCommand(gCamera, kEdsCameraCommand_MovieSelectSwON, 0);
         }
     }
-    if (err != EDS_ERR_OK) { printf("Error turning on movie mode. EdsError: %d\n", err); }    
+    if (err != EDS_ERR_OK) { printf("Error turning on movie mode. EdsError: %d\n", err); }  */  
     
     // Begin movie shooting
     EdsUInt32 record_start = 4;
@@ -1615,36 +1726,49 @@ void cmd_startMovie(void)
 * --------------------------------------------------------------------------*/
 void cmd_stopMovie(void)
 {
+
+    if (!isSDKInitialized || !isSessionOpen || gCamera == NULL)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "SDK not initialized or session not open.");
+    }
+
+    if (!recordingActive)
+    {
+        return;
+    }
+
     EdsError err = EDS_ERR_OK;
 
-    if (gCamera)
-    {
-        // Stop movie recording
-        EdsUInt32 record_stop = 0; 
-        err = EdsSetPropertyData(gCamera, kEdsPropID_Record, 0, sizeof(record_stop), &record_stop);
+    // Stop movie recording
+    EdsUInt32 record_stop = 0; 
+    err = EdsSetPropertyData(gCamera, kEdsPropID_Record, 0, sizeof(record_stop), &record_stop);
               
-        // Check Error
-        if (err != EDS_ERR_OK) { printf("Error stopping movie EdsError: %d\n", err); }          
-
-		// Turn off movie mode
-        // Check Movie mode
-        EdsUInt32 movieMode;
-        if (err == EDS_ERR_OK)
-        {
-            err = EdsGetPropertyData(gCamera, kEdsPropID_FixedMovie, 0, sizeof(movieMode), &movieMode);
-        }
-        if (err != EDS_ERR_OK) { printf("Error getting movie mode state. EdsError: %d\n", err); }
-
-        // Set movie mode to off
-        if (err == EDS_ERR_OK)
-        {
-            if (movieMode == 1)
-            {
-                err = EdsSendCommand(gCamera, kEdsCameraCommand_MovieSelectSwOFF, 0); //triggeres event 204 "kEdsObjectEvent_DirItemCreated"
-            }
-        }
-        if (err != EDS_ERR_OK) { printf("Error turning off movie mode. EdsError: %d\n", err); }
+    // Check Error
+    if (err != EDS_ERR_OK)
+    {
+        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+            "Error stopping movie. EdsError: %d", (int)err);
     }
+
+	// Turn off movie mode
+    // Check Movie mode
+    //EdsUInt32 movieMode;
+    //if (err == EDS_ERR_OK)
+    //{
+    //    err = EdsGetPropertyData(gCamera, kEdsPropID_FixedMovie, 0, sizeof(movieMode), &movieMode);
+    //}
+    //if (err != EDS_ERR_OK) { printf("Error getting movie mode state. EdsError: %d\n", err); }
+
+    //// Set movie mode to off
+    //if (err == EDS_ERR_OK)
+    //{
+    //    if (movieMode == 1)
+    //    {
+    //        err = EdsSendCommand(gCamera, kEdsCameraCommand_MovieSelectSwOFF, 0); //triggeres event 204 "kEdsObjectEvent_DirItemCreated"
+    //    }
+    //}
+    //if (err != EDS_ERR_OK) { printf("Error turning off movie mode. EdsError: %d\n", err); }
 
     recordingActive = false;
     movElapsedTime = 0.0;
@@ -1691,10 +1815,10 @@ mxArray* cmd_getCameraState(void)
     // create constant character pointer string array to store ouput fieldnames
     const char* fieldnames[] = { "isSDKInitialized", "isSessionOpen","liveViewActive", "frameSizeKnown",
         "recordingActive", "mexLocked", "downloadingActive", "pendingMovieDownload", "shutterSpeeds", 
-        "apertureFNumbers","ISOSpeeds", "currentShutterSpeed", "currentAperture","currentISO"};
+        "apertureFNumbers","ISOSpeeds", "currentShutterSpeed", "currentAperture","currentISO", "movieModeActive"};
 
     // Create matlab structure matrix to populate here
-    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 14, fieldnames);
+    mxArray* camStateStruct = mxCreateStructMatrix(1, 1, 15, fieldnames);
 
     // Set all the fields
     mxSetField(camStateStruct, 0, "isSDKInitialized", mxCreateLogicalScalar(isSDKInitialized));
@@ -1712,6 +1836,8 @@ mxArray* cmd_getCameraState(void)
     mxSetField(camStateStruct, 0, "downloadingActive", mxCreateLogicalScalar(downloadingActive));
 
     mxSetField(camStateStruct, 0, "pendingMovieDownload", mxCreateLogicalScalar(pendingMovieDownload));
+
+    mxSetField(camStateStruct, 0, "movieModeActive", mxCreateLogicalScalar(movieModeActive));
 
     // Get all the possibe shutter speed values, aperature values, and iso values
     if (isSDKInitialized && isSessionOpen && gCamera != NULL)
@@ -1880,7 +2006,7 @@ void cmd_setTv(double TvDouble)
         EdsUInt32 Tv_prop_val = TvPropDesc.propDesc[TvIdx];
 
         // Set the property 
-        err = EdsSetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(kEdsPropID_Tv), &Tv_prop_val);
+        err = EdsSetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(Tv_prop_val), &Tv_prop_val);
 
         if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Tv. EdsError: %d", err); }
     }
@@ -1953,7 +2079,7 @@ void cmd_setAv(double apertureDouble)
         EdsUInt32 Av_prop_val = AvPropDesc.propDesc[AvIdx];
 
         // Set the property 
-        err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(kEdsPropID_Av), &Av_prop_val);
+        err = EdsSetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(Av_prop_val), &Av_prop_val);
 
         if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_Av. EdsError: %d", err); }
     }
@@ -2022,7 +2148,7 @@ void cmd_setISO(double isoDouble)
         EdsUInt32 isoSpeed_prop_val = ISOPropDesc.propDesc[isoIdx];
 
         // Set the property 
-        err = EdsSetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(kEdsPropID_ISOSpeed), &isoSpeed_prop_val);
+        err = EdsSetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(isoSpeed_prop_val), &isoSpeed_prop_val);
 
         if (err != EDS_ERR_OK) { printf("Error setting property kEdsPropID_ISOSpeed. EdsError: %d", err); }
     }
@@ -2077,13 +2203,33 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
             "Command string too long.");
     }
 
+    if (strcmp(command, "setMovieMode") == 0)
+    {
+        if (nrhs != 2)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:InputError",
+                "setMovieMode requires exactly 2 inputs: edsdk_mex('setMovieMode', true/false).");
+        }
+
+        if (!mxIsScalar(prhs[1]) || mxIsComplex(prhs[1]) ||
+            !(mxIsLogical(prhs[1]) || mxIsNumeric(prhs[1])))
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:TypeError",
+                "setMovieMode second argument must be logical or numeric scalar.");
+        }
+
+        bool movieModeOn = mxGetScalar(prhs[1]) != 0.0;
+        cmd_setMovieMode(movieModeOn);
+        return;
+    }
+
     // Check for command with two input arguemnts
     if (strcmp(command, "setAv") == 0 || strcmp(command, "setISO") == 0 || strcmp(command, "setTv") == 0)
     {
         // Check if number of arugments is 2
-        if (nrhs > 2) 
+        if (nrhs != 2) 
         {
-            mexErrMsgIdAndTxt("edsdk_mex.c:InputError", "setAv or setISO requires exactly 2 inputs: edsdk_mex('setAv', apertureValue) or edsdk_mex('setISO', isoValue).");
+            mexErrMsgIdAndTxt("edsdk_mex.c:InputError", "setAv, setISO, setTv, and setMovieMode requires exactly 2 inputs: edsdk_mex('setAv', apertureValue) or edsdk_mex('setISO', isoValue).");
         }
 
         // Check if input is double scalar
