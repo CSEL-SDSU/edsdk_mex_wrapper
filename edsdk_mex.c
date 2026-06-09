@@ -1538,7 +1538,13 @@ mxArray* cmd_getFrame(void)
 
 }
 
-
+/*------------------------------------------------------------------------------
+* Function:    cmd_startMovie
+* Description: Changes the camera mode. Requires initiaized and valid camera. 
+*              Cannot be changed when recording. 
+* Parameters: bool movieModeOn - flag to set movie mode to on or off 
+* Returns:    None
+* --------------------------------------------------------------------------*/
 void cmd_setMovieMode(bool movieModeOn)
 {
     // allow if initialized and open and camera exists and not currently recording
@@ -1837,12 +1843,25 @@ mxArray* cmd_getCameraState(void)
 
     mxSetField(camStateStruct, 0, "pendingMovieDownload", mxCreateLogicalScalar(pendingMovieDownload));
 
-    mxSetField(camStateStruct, 0, "movieModeActive", mxCreateLogicalScalar(movieModeActive));
-
     // Get all the possibe shutter speed values, aperature values, and iso values
     if (isSDKInitialized && isSessionOpen && gCamera != NULL)
     {
         EdsError err = EDS_ERR_OK;
+
+        // Check if camera is in movie mode or not.
+        // movieMode 0 : Disable , 1 : Enable
+        EdsUInt32 movieMode = 0;
+        if (err == EDS_ERR_OK)
+        {
+            err = EdsGetPropertyData(gCamera, kEdsPropID_FixedMovie, 0, sizeof(movieMode), &movieMode);
+        }
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "Error getting movie mode state. EdsError: %d", (int)err);
+        }
+        movieModeActive = (bool)movieMode;
+
 
         EdsPropertyDesc AvPropDesc = { 0 };
         EdsPropertyDesc TvPropDesc = { 0 };
@@ -1896,8 +1915,6 @@ mxArray* cmd_getCameraState(void)
             ISO_speeds_array_values[k] = eds_iso_code_to_value(ISOPropDesc.propDesc[k]);
         }
 
-
-
         // Get the current settings for Shutter speed, aperture, and iso
         EdsUInt32 currentTv;
         EdsUInt32 currentAv;
@@ -1931,6 +1948,9 @@ mxArray* cmd_getCameraState(void)
         mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(eds_Tv_value_to_shutter_speed(currentTv)));
         mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(eds_av_code_to_fnumber(currentAv)));
         mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(eds_iso_code_to_value(currentISOSpeed)));
+
+        // If camera is connected, get the query movie mode, else make zero
+        mxSetField(camStateStruct, 0, "movieModeActive", mxCreateLogicalScalar(movieModeActive));
     }
     else
     {
@@ -1941,6 +1961,7 @@ mxArray* cmd_getCameraState(void)
         mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(0.0));
         mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(0.0));
         mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "movieModeActive", mxCreateLogicalScalar(false));
     }
 
     return camStateStruct;
@@ -2174,7 +2195,9 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         cleanup(EDS_ERR_OK); // perform remaining cleanup, clean mex in main matlab thread
         shutDownRequested = false;
         mexShutDownHandled = true; 
-        printf("Shutdown request caught, mex unlocked. \n");
+        //printf("Shutdown request caught, mex unlocked. \n");
+        mexErrMsgIdAndTxt("edsdk_mex_c:CameraShutdown",
+            "Camera shutdown or disconnected. EDSDK resouir");
 
         return;
     }
