@@ -1714,94 +1714,108 @@ mxArray* cmd_getCameraState(void)
     mxSetField(camStateStruct, 0, "pendingMovieDownload", mxCreateLogicalScalar(pendingMovieDownload));
 
     // Get all the possibe shutter speed values, aperature values, and iso values
-    EdsError err = EDS_ERR_OK;
-
-    EdsPropertyDesc AvPropDesc = { 0 };
-    EdsPropertyDesc TvPropDesc = { 0 };
-    EdsPropertyDesc ISOPropDesc = { 0 };
-
-    err = EdsGetPropertyDesc(gCamera, kEdsPropID_Av, &AvPropDesc);
-    if (err != EDS_ERR_OK)
+    if (isSDKInitialized && isSessionOpen && gCamera != NULL)
     {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_Av property description, EdsError code = %d \n", (int)err);
-    }
+        EdsError err = EDS_ERR_OK;
 
-    err = EdsGetPropertyDesc(gCamera, kEdsPropID_Tv, &TvPropDesc);
-    if (err != EDS_ERR_OK)
+        EdsPropertyDesc AvPropDesc = { 0 };
+        EdsPropertyDesc TvPropDesc = { 0 };
+        EdsPropertyDesc ISOPropDesc = { 0 };
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_Av, &AvPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Av property description, EdsError code = %d \n", (int)err);
+        }
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_Tv, &TvPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Tv property description, EdsError code = %d \n", (int)err);
+        }
+
+        err = EdsGetPropertyDesc(gCamera, kEdsPropID_ISOSpeed, &ISOPropDesc);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_ISOSpeed property description, EdsError code = %d \n", (int)err);
+        }
+
+        // Allocate matlab arrays for the possible values 
+        mxArray* shutter_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)TvPropDesc.numElements, mxREAL);
+        mxArray* aperture_fnumbers = mxCreateDoubleMatrix((mwSize)1, (mwSize)AvPropDesc.numElements, mxREAL);
+        mxArray* ISO_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)ISOPropDesc.numElements, mxREAL);
+
+        // Get pointers to the underlying data in the mxarrays
+        double* shutter_speeds_array_values = mxGetDoubles(shutter_speeds);
+        double* aperture_fnumbers_array_values = mxGetDoubles(aperture_fnumbers);
+        double* ISO_speeds_array_values = mxGetDoubles(ISO_speeds);
+
+        // Loop over all the values in the TvPropDesc and convert them to actual shutter speeds.
+        // Modify the underlying data of the mxarray 
+        for (int i = 0; i < TvPropDesc.numElements; i++)
+        {
+            shutter_speeds_array_values[i] = eds_Tv_value_to_shutter_speed(TvPropDesc.propDesc[i]);
+        }
+
+        for (int j = 0; j < AvPropDesc.numElements; j++)
+        {
+            aperture_fnumbers_array_values[j] = eds_av_code_to_fnumber(AvPropDesc.propDesc[j]);
+        }
+
+        for (int k = 0; k < ISOPropDesc.numElements; k++)
+        {
+            ISO_speeds_array_values[k] = eds_iso_code_to_value(ISOPropDesc.propDesc[k]);
+        }
+
+
+
+        // Get the current settings for Shutter speed, aperture, and iso
+        EdsUInt32 currentTv;
+        EdsUInt32 currentAv;
+        EdsUInt32 currentISOSpeed;
+
+        err = EdsGetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(currentAv), &currentAv);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Av property data EdsError code = %d \n", (int)err);
+        }
+
+        err = EdsGetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(currentTv), &currentTv);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_Tv property data EdsError code = %d \n", (int)err);
+        }
+
+        err = EdsGetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(currentISOSpeed), &currentISOSpeed);
+        if (err != EDS_ERR_OK)
+        {
+            mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
+                "error getting kEdsPropID_ISOSpeed property data EdsError code = %d \n", (int)err);
+        }
+
+        // Add arrays to the state struct
+        mxSetField(camStateStruct, 0, "shutterSpeeds", shutter_speeds);
+        mxSetField(camStateStruct, 0, "apertureFNumbers", aperture_fnumbers);
+        mxSetField(camStateStruct, 0, "ISOSpeeds", ISO_speeds);
+        mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(eds_Tv_value_to_shutter_speed(currentTv)));
+        mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(eds_av_code_to_fnumber(currentAv)));
+        mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(eds_iso_code_to_value(currentISOSpeed)));
+    }
+    else
     {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_Tv property description, EdsError code = %d \n", (int)err);
+        // Add arrays to the state struct
+        mxSetField(camStateStruct, 0, "shutterSpeeds", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "apertureFNumbers", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "ISOSpeeds", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(0.0));
+        mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(0.0));
     }
-
-    err = EdsGetPropertyDesc(gCamera, kEdsPropID_ISOSpeed, &ISOPropDesc);
-    if (err != EDS_ERR_OK)
-    {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_ISOSpeed property description, EdsError code = %d \n", (int)err);
-    }
-
-    // Allocate matlab arrays for the possible values 
-    mxArray* shutter_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)TvPropDesc.numElements, mxREAL);
-    mxArray* aperture_fnumbers = mxCreateDoubleMatrix((mwSize)1, (mwSize)AvPropDesc.numElements, mxREAL);
-    mxArray* ISO_speeds = mxCreateDoubleMatrix((mwSize)1, (mwSize)ISOPropDesc.numElements, mxREAL);
-
-    // Get pointers to the underlying data in the mxarrays
-    double* shutter_speeds_array_values = mxGetDoubles(shutter_speeds);
-    double* aperture_fnumbers_array_values = mxGetDoubles(aperture_fnumbers);
-    double* ISO_speeds_array_values = mxGetDoubles(ISO_speeds);
-
-    // Loop over all the values in the TvPropDesc and convert them to actual shutter speeds.
-    // Modify the underlying data of the mxarray 
-    for (int i = 0; i < TvPropDesc.numElements; i++)
-    {
-        shutter_speeds_array_values[i] = eds_Tv_value_to_shutter_speed(TvPropDesc.propDesc[i]);
-    }
-
-    for (int j = 0; j < AvPropDesc.numElements; j++)
-    {
-        aperture_fnumbers_array_values[j] = eds_av_code_to_fnumber(AvPropDesc.propDesc[j]);
-    }
-
-    for (int k = 0; k < ISOPropDesc.numElements; k++)
-    {
-        ISO_speeds_array_values[k] = eds_iso_code_to_value(ISOPropDesc.propDesc[k]);
-    }
-
-    // Add arrays to the state struct
-    mxSetField(camStateStruct, 0, "shutterSpeeds", shutter_speeds);
-    mxSetField(camStateStruct, 0, "apertureFNumbers", aperture_fnumbers);
-    mxSetField(camStateStruct, 0, "ISOSpeeds", ISO_speeds);
-
-    // Get the current settings for Shutter speed, aperture, and iso
-    EdsUInt32 currentTv;
-    EdsUInt32 currentAv;
-    EdsUInt32 currentISOSpeed;
-
-    err = EdsGetPropertyData(gCamera, kEdsPropID_Av, 0, sizeof(currentAv), &currentAv);
-    if (err != EDS_ERR_OK)
-    {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_Av property data EdsError code = %d \n", (int)err);
-    }
-
-    err = EdsGetPropertyData(gCamera, kEdsPropID_Tv, 0, sizeof(currentTv), &currentTv);
-    if (err != EDS_ERR_OK)
-    {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_Tv property data EdsError code = %d \n", (int)err);
-    }
-
-    err = EdsGetPropertyData(gCamera, kEdsPropID_ISOSpeed, 0, sizeof(currentISOSpeed), &currentISOSpeed);
-    if (err != EDS_ERR_OK)
-    {
-        mexErrMsgIdAndTxt("edsdk_mex_c:EDSDKError",
-            "error getting kEdsPropID_ISOSpeed property data EdsError code = %d \n", (int)err);
-    }
-
-    mxSetField(camStateStruct, 0, "currentShutterSpeed", mxCreateDoubleScalar(eds_Tv_value_to_shutter_speed(currentTv)));
-    mxSetField(camStateStruct, 0, "currentAperture", mxCreateDoubleScalar(eds_av_code_to_fnumber(currentAv)));
-    mxSetField(camStateStruct, 0, "currentISO", mxCreateDoubleScalar(eds_iso_code_to_value(currentISOSpeed)));
 
     return camStateStruct;
 }
