@@ -1578,11 +1578,16 @@ void cmd_setMovieMode(bool movieModeOn)
 
     movieModeActive = (movieMode != 0);
 
-    if (movieModeActive == movieModeOn)
+    /*if (movieModeActive == movieModeOn && movieModeActive == false)
     {
         return;
-    }
+    }*/
 
+    // movie mode could be on but save to camera could be false?
+    // 
+    // if movieModeActive == movieModeOn == 0 return
+    // if movieModeActive == movieModeOn == 1, check save to camera 
+    // 
     // Set movie mode if it needs to be changed
     if (movieModeOn)
     {
@@ -2197,7 +2202,7 @@ void mexFunction(int nlhs, mxArray* plhs[], int nrhs, const mxArray* prhs[])
         mexShutDownHandled = true; 
         //printf("Shutdown request caught, mex unlocked. \n");
         mexErrMsgIdAndTxt("edsdk_mex_c:CameraShutdown",
-            "Camera shutdown or disconnected. EDSDK resouir");
+            "Camera shutdown or disconnected.");
 
         return;
     }
